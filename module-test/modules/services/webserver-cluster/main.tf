@@ -4,6 +4,7 @@ locals {
   any_protocol = "-1"
   tcp_protocol = "tcp"
   all_ips = ["0.0.0.0/0"]
+  user_data_file_name = var.enable_new_user_data ? "user-data-new.sh" : "user-data.sh"
 }
 
 resource "aws_launch_template" "example" {
@@ -12,7 +13,7 @@ resource "aws_launch_template" "example" {
   instance_type = var.instance_type
   vpc_security_group_ids = [aws_security_group.instance.id]
 
-  user_data = base64encode(templatefile("${path.module}/user-data.sh", {
+  user_data = base64encode(templatefile("${path.module}/${local.user_data_file_name}", {
     server_port = var.server_port
     db_user = "admin"
     db_password = jsondecode(data.aws_secretsmanager_secret_version.db_password.secret_string)["password"]
@@ -21,6 +22,7 @@ resource "aws_launch_template" "example" {
     alb_dns = aws_lb.example.dns_name
   }))
   key_name = "JH_Keypair"
+
   lifecycle {
     create_before_destroy = true
   }
@@ -31,20 +33,49 @@ resource "aws_autoscaling_group" "example" {
     id = aws_launch_template.example.id
     version = aws_launch_template.example.latest_version
   }
-  
+  name = "${var.cluster_name}-${aws_launch_template.example.latest_version}"
   availability_zones = ["ap-northeast-2a","ap-northeast-2c"]
   target_group_arns = [aws_lb_target_group.asg.arn]
   health_check_type = "ELB"
 
   min_size = var.min_size
   max_size = var.max_size
+  lifecycle {
+    create_before_destroy = true
+  }
 
-  tag {
-    key                 = "Name"
-    value               = var.cluster_name
+  dynamic "tag" {
+  for_each = var.custom_tags
+
+  content {
+    key                 = tag.key
+    value               = tag.value
     propagate_at_launch = true
   }
 }
+}
+resource "aws_autoscaling_schedule" "scale_out_during_business_hours" {
+  count = var.enable_autoscaling ? 1 : 0
+  scheduled_action_name = "scale-out-during-business-hours"
+  min_size              = 2
+  max_size              = 10
+  desired_capacity      = 4
+  recurrence            = "0 9 * * *"
+
+  autoscaling_group_name = aws_autoscaling_group.example.name
+}
+
+resource "aws_autoscaling_schedule" "scale_in_at_night" {
+  count = var.enable_autoscaling ? 1 : 0
+  scheduled_action_name = "scale-in-at-night"
+  min_size              = 2
+  max_size              = 10
+  desired_capacity      = 2
+  recurrence            = "0 18 * * *"
+
+  autoscaling_group_name = aws_autoscaling_group.example.name
+}
+
 
 resource "aws_security_group" "instance" {
   name = "${var.cluster_name}-instance"
@@ -149,6 +180,42 @@ resource "aws_security_group" "alb" {
     protocol    = local.any_protocol
     cidr_blocks = local.all_ips
   }
+}
+
+resource "aws_cloudwatch_metric_alarm" "high_cpu_utilization" {
+  alarm_name = "{var.cluster_name}-high-cpu-utilization"
+  namespace = "AWS/EC2"
+  metric_name = "CPUUtilization"
+
+  dimensions = {
+    autoscaling_group_name = aws_autoscaling_group.example.name
+  }
+  
+  comparison_operator   = "GreaterThanThreshold"
+  evaluation_periods    = 1
+  period                = 300
+  statistic             = "Average"
+  threshold             = 90
+  unit                  = "Percent"
+}
+
+resource "aws_cloudwatch_metric_alarm" "low_cpu_utilization" {
+  count = format("%.1s", var.instance_type) == "t" ? 1 : 0
+  
+  alarm_name = "{var.cluster_name}-low-cpu-utilization"
+  namespace = "AWS/EC2"
+  metric_name = "CPUCreditBalance"
+
+  dimensions = {
+    autoscaling_group_name = aws_autoscaling_group.example.name
+  }
+  
+  comparison_operator   = "LessThanThreshold"
+  evaluation_periods    = 1
+  period                = 300
+  statistic             = "Minimum"
+  threshold             = 10
+  unit                  = "Count"
 }
 
 data "terraform_remote_state" "db" {

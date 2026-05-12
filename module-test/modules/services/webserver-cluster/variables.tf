@@ -58,3 +58,19 @@ variable "instance_type" {
   description = "The type of EC2 Instances to run (e.g. t2.micro)"
   type        = string
 }
+
+variable "custom_tags" {
+  description = "Custom tags to set on the Instances in the ASG"
+  type        = map(string)
+  default     = {}
+}
+
+variable "enable_autoscaling" {
+  description = "If set to true, enable auto scaling"
+  type        = bool
+}
+
+variable "enable_new_user_data" {
+  description = "It it true than use user-data-new.sh else use user-data.sh"
+  type        = bool
+}
